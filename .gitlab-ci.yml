@@ -1,0 +1,68 @@
+stages:
+  - docker-build
+  - test
+  - registery-push
+  - kubedeploy
+
+# This block workaround for git pull DNS problem
+before_script:
+  - rm -rf flask-with-test
+after_script:
+  - rm -rf flask-with-test
+
+docker-build:
+  stage: docker-build
+  variables:
+    # Had some issue with hostname and DNS resolving this is just nice work around.
+    # Warning Don't store your password like that :)
+    GIT_STRATEGY: none
+  script:
+    - git clone http://root:password@gitlab.default.svc.cluster.local:8080/root/flask-with-test.git
+    - cd flask-with-test
+    - sudo docker build . -t $CI_COMMIT_SHORT_SHA
+
+# Do Various tests in this part
+test:
+  stage: test
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - sudo docker run --rm -t --entrypoint /app/test.sh $CI_COMMIT_SHORT_SHA
+
+registery-push:
+  stage: registery-push
+  before_script:
+    - git clone http://root:password@gitlab.default.svc.cluster.local:8080/root/flask-with-test.git
+    - source flask-with-test/.env
+  variables:
+    GIT_STRATEGY: none
+  script:
+    # TODO Change with your credentials
+    # Login to DockerHub
+    - echo $DOCKERHUB_USER
+    - cat /etc/gitlab-runner/SECRET_DOCKERHUB_PASSWORD | sudo docker login --username $DOCKERHUB_USER --password-stdin
+    - echo $IMAGE_VERSION
+    - sudo docker tag $CI_COMMIT_SHORT_SHA $DOCKERHUB_USER/flask-with-test:$IMAGE_VERSION
+    - sudo docker push $DOCKERHUB_USER/flask-with-test:$IMAGE_VERSION
+  only:
+    - master
+
+kubedeploy:
+  stage: kubedeploy
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - git clone http://root:password@gitlab.default.svc.cluster.local:8080/root/flask-with-test.git
+    - source flask-with-test/.env
+  after_script:
+    - rm -rf kubectl
+  script:
+    - curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x kubectl
+    - envsubst < flask-with-test/blueprints/app.yml | ./kubectl apply -f - --insecure-skip-tls-verify --server=$KUBE_URL --token $(cat /etc/gitlab-runner/SECRET_SA_TOKEN)
+    - sleep 5
+    # If you want to deploy somewhere else change server parameter, also SECRET_SA_TOKEN in your shared folder
+    - ./kubectl get pod --insecure-skip-tls-verify --server=$KUBE_URL --token $(cat /etc/gitlab-runner/SECRET_SA_TOKEN) -n gitlab-managed
+    - rm -rf kubectl
+  only:
+    - master
